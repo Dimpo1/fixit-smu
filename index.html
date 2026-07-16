@@ -214,7 +214,7 @@
    ============================================================ */
 
 const SUPABASE_URL = "https://jjuznuvducfziicgkqcw.supabase.co";       // e.g. https://xxxxxxxx.supabase.co
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpqdXpudXZkdWNmemlpY2drcWN3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQyMDIzNDQsImV4cCI6MjA5OTc3ODM0NH0.i__cNOFKf9ZxsgEJP50YTfG8kbuQfmCO6V6wpRqaC6k";
+const SUPABASE_ANON_KEY = "sb_publishable_T8ubMSG_OHW6c_LWBAJPDQ_knrwrgbm";
 const CONFIGURED = !SUPABASE_URL.includes("YOUR_") && !SUPABASE_ANON_KEY.includes("YOUR_");
 const sb = CONFIGURED ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
 
