@@ -213,7 +213,7 @@
    SUPABASE_ANON_KEY below before this will work.
    ============================================================ */
 
-const SUPABASE_URL = "https://jjuznuvducfziicgkqcw.supabase.co/rest/v1/";       // e.g. https://xxxxxxxx.supabase.co
+const SUPABASE_URL = "https://jjuznuvducfziicgkqcw.supabase.co";       // e.g. https://xxxxxxxx.supabase.co
 const SUPABASE_ANON_KEY = "sb_publishable_T8ubMSG_OHW6c_LWBAJPDQ_knrwrgbm";
 const CONFIGURED = !SUPABASE_URL.includes("YOUR_") && !SUPABASE_ANON_KEY.includes("YOUR_");
 const sb = CONFIGURED ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
