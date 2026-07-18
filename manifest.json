@@ -2,7 +2,7 @@
   "name": "Fixit SMU",
   "short_name": "Fixit SMU",
   "description": "Report and track residence and campus issues at SMU.",
-  "start_url": "./fixit-smu-live.html",
+  "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "background_color": "#F7F5F0",
