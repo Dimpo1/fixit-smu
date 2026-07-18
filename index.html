@@ -4,6 +4,13 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Fixit SMU — Report It, Track It, Fix It</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0F5C56" />
+<link rel="icon" href="icons/icon-192.png" />
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Fixit SMU" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
@@ -222,7 +229,8 @@ const ROLE_LABELS = {
   student: "Student",
   house_committee: "House Committee Member",
   residence_manager: "Residence Manager",
-  src: "SRC Member"
+  src: "SRC Member",
+  vendor: "External Vendor"
 };
 
 const CHAINS = {
@@ -309,13 +317,15 @@ let state = {
   authError: "",
   authSuccess: "",
   lastSignupEmail: "",
+  signupDraft: {},          // preserves entered signup values across a failed-validation re-render
   toast: null,
   newIssueType: null,
   newUrgency: "medium",
   notifications: [],
   adminResults: [],
   adminSelected: null,
-  slaBreachTicketIds: new Set()
+  slaBreachTicketIds: new Set(),
+  approvedPartners: []
 };
 
 /* ---------------- small helpers ---------------- */
@@ -396,7 +406,11 @@ try{
 /* ---------------- auth ---------------- */
 function validEmail(email){
   const e = email.trim().toLowerCase();
-  return /^[0-9]{9}@swave\.smu\.ac\.za$/.test(e) || /^[^@]+@smu\.ac\.za$/.test(e);
+  // SMU addresses always pass here. Anything else that's still a well-formed
+  // email is allowed to attempt signup too — the database is the real
+  // authority (enforce_smu_email trigger), and will reject it with a clear
+  // message unless an admin has pre-approved it as an external partner.
+  return /^[0-9]{9}@swave\.smu\.ac\.za$/.test(e) || /^[^@]+@smu\.ac\.za$/.test(e) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 }
 
 async function handleSignup(form){
@@ -406,6 +420,12 @@ async function handleSignup(form){
   const phone = form.phone.value.trim();
   const roomNumber = form.roomNumber ? form.roomNumber.value.trim() : "";
   const residence = resolveOtherField(form, 'residence');
+
+  // Preserve everything the person already typed right away — if validation
+  // fails below, render() redraws this whole form, and only fields wired to
+  // this draft survive that. (Password is deliberately left out — normal
+  // practice is to make them retype it, not persist it in state.)
+  state.signupDraft = { name, email, phone, roomNumber, residence };
 
   if(!validEmail(email)){
     state.authError = "Use your official SMU email — nine digits + @swave.smu.ac.za for students (e.g. 202312345@swave.smu.ac.za), or your staff @smu.ac.za address.";
@@ -437,6 +457,7 @@ async function handleSignup(form){
   state.authSuccess = "Account created! Sign in below to continue.";
   state.authMode = "signin";
   state.lastSignupEmail = email;
+  state.signupDraft = {};
   render();
 }
 
@@ -477,8 +498,9 @@ async function loadUserAndGo(){
   try{ await sb.rpc('run_sla_escalations'); }catch(e){ /* fine if not permitted yet */ }
   const loaders = [loadTickets(), loadHealth(), loadLeaders(), loadNotifications()];
   if(profile.is_admin || profile.role === "residence_manager") loaders.push(loadAnalytics());
+  if(profile.is_admin) loaders.push(loadApprovedPartners());
   await Promise.all(loaders);
-  setView(profile.role==="student" ? "report" : "queue");
+  setView(profile.role==="student" ? "report" : profile.role==="vendor" ? "vendor-tickets" : "queue");
   subscribeRealtime();
 }
 
@@ -589,6 +611,20 @@ async function resolveTicket(ticket, note){
   showToast("Marked as resolved.");
 }
 
+async function forwardToVendor(ticket, vendor){
+  if(!vendor) return;
+  const now = nowIso();
+  const { error } = await sb.from('tickets').update({ vendor_forwarded_at: now }).eq('id', ticket.id);
+  if(error){ showToast("Could not forward: " + error.message); return; }
+  await sb.from('ticket_events').insert({
+    ticket_id: ticket.id, stage: ticket.chain[ticket.stage_index-1], action: "vendor_forwarded",
+    note: `Forwarded to ${vendor.vendor_company || vendor.name} for troubleshooting.`,
+    by_name: state.user.name, by_role: state.user.role
+  });
+  await Promise.all([loadTickets(), loadTicketEvents(ticket.id)]);
+  showToast("Forwarded to " + (vendor.vendor_company||vendor.name) + ".");
+}
+
 async function reopenTicket(ticket, note){
   await sb.from('tickets').update({ status: "open", sla_clock_start: nowIso(), resolved_at: null }).eq('id', ticket.id);
   await sb.from('ticket_events').insert({
@@ -671,12 +707,35 @@ async function adminSearch(q){
   state.adminResults = data || [];
   render();
 }
-async function adminAssignRole(userId, role, residence, phone){
-  const { error } = await sb.from('profiles').update({ role, residence: residence||"", phone: phone||"" }).eq('id', userId);
+async function adminAssignRole(userId, role, residence, phone, vendorResidence, vendorCategory, vendorCompany){
+  const { error } = await sb.from('profiles').update({
+    role, residence: residence||"", phone: phone||"",
+    vendor_residence: vendorResidence||"", vendor_category: vendorCategory||"", vendor_company: vendorCompany||""
+  }).eq('id', userId);
   if(error){ showToast("Could not update: " + error.message); return; }
   showToast("Role updated.");
   await loadLeaders();
   state.adminSelected = null;
+  render();
+}
+
+/* ---------------- admin: pre-approved external partner emails ---------------- */
+async function loadApprovedPartners(){
+  const { data } = await sb.from('approved_partner_emails').select('*').order('added_at', {ascending:false});
+  state.approvedPartners = data || [];
+}
+async function addApprovedPartner(email, company){
+  email = (email||"").trim().toLowerCase();
+  if(!email){ return; }
+  const { error } = await sb.from('approved_partner_emails').insert({ email, company: (company||"").trim() });
+  if(error){ showToast("Could not add: " + error.message); return; }
+  await loadApprovedPartners();
+  showToast("Pre-approved — they can now sign up with that email.");
+  render();
+}
+async function removeApprovedPartner(email){
+  await sb.from('approved_partner_emails').delete().eq('email', email);
+  await loadApprovedPartners();
   render();
 }
 
@@ -754,15 +813,16 @@ function renderSigninForm(){
 }
 
 function renderSignupForm(){
+  const d = state.signupDraft || {};
   return `
   <form id="signupForm">
     <div class="field">
       <label>Full name</label>
-      <input name="name" type="text" placeholder="Thabo Nkosi" required />
+      <input name="name" type="text" placeholder="Thabo Nkosi" value="${escapeHtml(d.name||'')}" required />
     </div>
     <div class="field">
       <label>SMU email</label>
-      <input name="email" type="email" placeholder="202312345@swave.smu.ac.za" required />
+      <input name="email" type="email" placeholder="202312345@swave.smu.ac.za" value="${escapeHtml(d.email||'')}" required />
       <div class="hint">Nine digits + @swave.smu.ac.za for students, or your staff @smu.ac.za address.</div>
     </div>
     <div class="field">
@@ -772,12 +832,12 @@ function renderSignupForm(){
     </div>
     <div class="field">
       <label>Room number</label>
-      <input name="roomNumber" type="text" placeholder="e.g. 214" />
+      <input name="roomNumber" type="text" placeholder="e.g. 214" value="${escapeHtml(d.roomNumber||'')}" />
     </div>
-    ${selectWithOther('residence', RESIDENCES, 'Your residence', '', "Leave the fallback text box blank if you're off-campus — this just helps whoever's setting up leaders know where you live.")}
+    ${selectWithOther('residence', RESIDENCES, 'Your residence', d.residence||'', "Leave the fallback text box blank if you're off-campus — this just helps whoever's setting up leaders know where you live.")}
     <div class="field">
       <label>Phone number</label>
-      <input name="phone" type="tel" placeholder="e.g. 082 000 0000" />
+      <input name="phone" type="tel" placeholder="e.g. 082 000 0000" value="${escapeHtml(d.phone||'')}" />
     </div>
     <button type="submit" class="btn btn-primary" style="width:100%;justify-content:center;">Create account</button>
   </form>`;
@@ -796,8 +856,9 @@ function bindAuthEvents(){
 
 function renderShell(){
   const u = state.user;
-  const isStaff = u.role !== "student";
+  const isStaff = u.role !== "student" && u.role !== "vendor";
   const isLeader = u.role==="house_committee" || u.role==="residence_manager" || u.role==="src";
+  const isVendor = u.role === "vendor";
   const canSeeAnalytics = u.is_admin || u.role === "residence_manager";
   const unread = unreadNotifCount();
   return `
@@ -807,16 +868,19 @@ function renderShell(){
         <div class="mark">F</div>
         <div><div class="name">Fixit SMU</div><div class="sub">Ga-Rankuwa Campus</div></div>
       </div>
+      ${!isVendor ? `
       <button class="nav-item ${state.view==='report'?'active':''}" data-nav="report"><span class="ico">✎</span> Report an issue</button>
       <button class="nav-item ${state.view==='my-reports'?'active':''}" data-nav="my-reports"><span class="ico">▤</span> My reports</button>
+      ` : ``}
       ${isStaff ? `
         <button class="nav-item ${state.view==='queue'?'active':''}" data-nav="queue"><span class="ico">📥</span> My queue</button>
         <button class="nav-item ${state.view==='all-tickets'?'active':''}" data-nav="all-tickets"><span class="ico">☰</span> All issues</button>
       ` : ``}
-      <button class="nav-item ${state.view==='health'?'active':''}" data-nav="health"><span class="ico">✚</span> Health &amp; emergency info</button>
+      ${isVendor ? `<button class="nav-item ${state.view==='vendor-tickets'?'active':''}" data-nav="vendor-tickets"><span class="ico">🔧</span> ${escapeHtml(u.vendor_category||'Reports')}${u.vendor_residence?' · '+escapeHtml(u.vendor_residence):''}</button>` : ``}
+      ${!isVendor ? `<button class="nav-item ${state.view==='health'?'active':''}" data-nav="health"><span class="ico">✚</span> Health &amp; emergency info</button>` : ``}
       ${isLeader ? `<button class="nav-item ${state.view==='emergency-lookup'?'active':''}" data-nav="emergency-lookup"><span class="ico">🚨</span> Emergency lookup</button>` : ``}
       <button class="nav-item ${state.view==='notifications'?'active':''}" data-nav="notifications"><span class="ico">🔔</span> Notifications ${unread>0?`<span class="nav-badge">${unread}</span>`:``}</button>
-      <button class="nav-item ${state.view==='leaders'?'active':''}" data-nav="leaders"><span class="ico">☎</span> Leader contacts</button>
+      ${!isVendor ? `<button class="nav-item ${state.view==='leaders'?'active':''}" data-nav="leaders"><span class="ico">☎</span> Leader contacts</button>` : ``}
       ${canSeeAnalytics ? `<button class="nav-item ${state.view==='analytics'?'active':''}" data-nav="analytics"><span class="ico">📊</span> Analytics</button>` : ``}
       ${u.is_admin ? `<button class="nav-item ${state.view==='admin'?'active':''}" data-nav="admin"><span class="ico">🛠</span> Admin</button>` : ``}
       <div class="nav-spacer"></div>
@@ -840,6 +904,7 @@ function renderView(){
     case "health": return renderHealthForm();
     case "queue": return renderQueue();
     case "all-tickets": return renderAllTickets();
+    case "vendor-tickets": return state.user.role==="vendor" ? renderVendorTickets() : renderReportForm();
     case "ticket": return renderTicketDetail();
     case "leaders": return renderLeaders();
     case "emergency-lookup": return renderEmergencyLookup();
@@ -1029,6 +1094,31 @@ function renderQueue(){
   `;
 }
 
+/* ---- vendor: reports automatically shared with them ---- */
+function renderVendorTickets(){
+  const u = state.user;
+  // RLS already restricts what comes back in state.tickets for a vendor
+  // session to exactly their scope, so no client-side filtering needed.
+  const open = state.tickets.filter(t=>t.status==='open').sort((a,b)=> new Date(a.created_at)-new Date(b.created_at));
+  const resolved = state.tickets.filter(t=>t.status==='resolved').sort((a,b)=> new Date(b.created_at)-new Date(a.created_at));
+  return `
+  <div class="topbar">
+    <div><h1>${escapeHtml(u.vendor_company||'Vendor')}</h1>
+    <p>Every ${escapeHtml(u.vendor_category||'issue')} report from ${escapeHtml(u.vendor_residence||'your residence')} — shared with you automatically.</p></div>
+  </div>
+  <div class="banner"><b>You can add updates/comments here.</b> Marking something fully resolved still happens on SMU's side once it's confirmed fixed.</div>
+  <h3 style="margin:20px 0 8px;font-size:14px;">Open (${open.length})</h3>
+  ${open.length ? open.map(t=>ticketRow(t)).join("") : `<div class="hint">Nothing open right now.</div>`}
+  <h3 style="margin:24px 0 8px;font-size:14px;">Resolved (${resolved.length})</h3>
+  ${resolved.length ? resolved.map(t=>ticketRow(t)).join("") : `<div class="hint">Nothing resolved yet.</div>`}
+  `;
+}
+function findVendorFor(t){
+  return state.leaders.find(u => u.role==='vendor'
+    && (u.vendor_residence||'').trim().toLowerCase() === (t.residence||'').trim().toLowerCase()
+    && (u.vendor_category||'').trim().toLowerCase() === (t.category||'').trim().toLowerCase());
+}
+
 function renderAllTickets(){
   const u = state.user;
   let list, subtitle;
@@ -1126,16 +1216,31 @@ function renderTicketDetail(){
     </div>
   </div>` : ``}
 
+  ${(()=>{ const vendor = canAct ? findVendorFor(t) : null; return vendor ? `
+  <div class="card" style="margin-bottom:20px;">
+    <div class="field"><label>Can't fix this yourself?</label></div>
+    <p class="hint" style="margin:0 0 12px;">${escapeHtml(vendor.vendor_company||vendor.name)} handles ${escapeHtml(t.category)} at ${escapeHtml(t.residence)} — this is a separate personal call, not automatic escalation.</p>
+    ${t.vendor_forwarded_at
+      ? `<div class="hint">✅ Forwarded to ${escapeHtml(vendor.vendor_company||vendor.name)} on ${fmtTime(t.vendor_forwarded_at)}. You can still resolve/escalate normally above once it's fixed.</div>`
+      : `<button class="btn btn-dark" id="forwardVendorBtn">Forward to ${escapeHtml(vendor.vendor_company||vendor.name)}</button>`}
+  </div>` : ``; })()}
+
+  ${state.user.role==='vendor' ? `
+  <div class="card" style="margin-bottom:20px;">
+    <div class="field"><label>Add an update</label><textarea id="vendorNote" placeholder="Let the House Committee know what's happening"></textarea></div>
+    <button class="btn btn-ghost" id="vendorCommentBtn">Post update</button>
+  </div>` : ``}
+
   ${isOwner && t.status==='resolved' ? `
   <div class="card" style="margin-bottom:20px;">
     <div class="field"><label>Not actually fixed?</label><textarea id="reopenNote" placeholder="Explain what's still wrong"></textarea></div>
     <button class="btn btn-danger" id="reopenBtn">Reopen this report</button>
   </div>` : ``}
 
-  ${isOwner && !canAct && t.status!=='resolved' ? `
+  ${isOwner && !canAct ? `
   <div class="card" style="margin-bottom:20px;">
-    <div class="field"><label>Add a comment</label><textarea id="ownerNote" placeholder="Add extra info for whoever is handling this"></textarea></div>
-    <button class="btn btn-ghost" id="ownerCommentBtn">Add comment</button>
+    <div class="field"><label>${t.status==='resolved' ? 'Reply on this report' : 'Add a comment'}</label><textarea id="ownerNote" placeholder="${t.status==='resolved' ? "Ask a follow-up or add more detail — this stays as a reply on the thread, it won't reopen the report" : 'Add extra info for whoever is handling this'}"></textarea></div>
+    <button class="btn btn-ghost" id="ownerCommentBtn">${t.status==='resolved' ? 'Post reply' : 'Add comment'}</button>
   </div>` : ``}
 
   <div class="card">
@@ -1174,7 +1279,8 @@ function timelineItem(e){
     reported:"Reported the issue", escalated:"Escalated to "+STAGE_LABELS[e.stage],
     resolved:"Marked as resolved", reopened:"Reopened the report", comment:"Commented",
     auto_escalated:"⏰ Auto-escalated to "+STAGE_LABELS[e.stage]+" (SLA breach)",
-    sla_exhausted:"⏰ Still overdue with the SRC"
+    sla_exhausted:"⏰ Still overdue with the SRC",
+    vendor_forwarded:"🔧 Forwarded to an external vendor"
   }[e.action] || e.action;
   return `
   <div class="timeline-item">
@@ -1452,7 +1558,7 @@ function barRows(dataObj, total){
 function renderAdmin(){
   return `
   <div class="topbar">
-    <div><h1>Admin</h1><p>Search a student and assign them as House Committee, Residence Manager, or SRC.</p></div>
+    <div><h1>Admin</h1><p>Search a student and assign them as House Committee, Residence Manager, SRC, or an external vendor.</p></div>
   </div>
   <div class="banner"><b>Only you can see this page.</b> Role changes take effect immediately.</div>
   <div class="card">
@@ -1467,6 +1573,26 @@ function renderAdmin(){
         </div>`).join("")}
     </div>
     ${state.adminSelected ? renderAdminAssignForm(state.adminSelected) : ``}
+  </div>
+
+  <div class="card" style="margin-top:20px;">
+    <h3 style="margin-top:0;font-size:15px;">External vendors — pre-approve an email</h3>
+    <p class="hint" style="margin:0 0 12px;">Vendors don't have SMU emails, so sign-up is blocked unless you add their exact email here first. Once added, tell them to sign up normally — then come back here, search for them, and assign the "External Vendor" role below.</p>
+    <form id="addPartnerForm" style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;">
+      <div class="field" style="flex:1;min-width:180px;margin-bottom:0;"><label>Email</label><input name="partnerEmail" type="email" placeholder="support@vendor.co.za" required /></div>
+      <div class="field" style="flex:1;min-width:160px;margin-bottom:0;"><label>Company (optional)</label><input name="partnerCompany" type="text" placeholder="e.g. FibreLink SA" /></div>
+      <button type="submit" class="btn btn-primary">Approve</button>
+    </form>
+    ${state.approvedPartners.length ? `
+    <div class="divider"></div>
+    ${state.approvedPartners.map(p => `
+      <div class="ticket-row" style="margin-top:8px;padding:10px 14px;">
+        <div class="t-main">
+          <div class="t-title">${escapeHtml(p.email)}</div>
+          <div class="t-sub">${escapeHtml(p.company||"No company name given")}</div>
+        </div>
+        <button class="btn btn-ghost btn-sm" data-remove-partner="${escapeHtml(p.email)}">Remove</button>
+      </div>`).join("")}` : `<p class="hint" style="margin-top:12px;">No pre-approved emails yet.</p>`}
   </div>`;
 }
 function renderAdminAssignForm(u){
@@ -1476,15 +1602,27 @@ function renderAdminAssignForm(u){
   <form id="adminAssignForm">
     <div class="field">
       <label>Role</label>
-      <select name="role">
+      <select name="role" id="adminRoleSelect">
         <option value="student" ${u.role==='student'?'selected':''}>Student</option>
         <option value="house_committee" ${u.role==='house_committee'?'selected':''}>House Committee Member</option>
         <option value="residence_manager" ${u.role==='residence_manager'?'selected':''}>Residence Manager</option>
         <option value="src" ${u.role==='src'?'selected':''}>SRC Member</option>
+        <option value="vendor" ${u.role==='vendor'?'selected':''}>External Vendor</option>
       </select>
     </div>
-    ${selectWithOther('adminResidence', RESIDENCES, 'Residence (for House Committee / Residence Manager)', u.residence||'', 'Leave blank for students or SRC.')}
+    ${selectWithOther('adminResidence', RESIDENCES, 'Residence (for House Committee / Residence Manager)', u.residence||'', 'Leave blank for students, SRC, or vendors.')}
     <div class="field"><label>Phone number</label><input name="phone" type="tel" value="${escapeHtml(u.phone||'')}" placeholder="e.g. 082 000 0000" /></div>
+    <div class="divider"></div>
+    <p class="hint" style="margin:0 0 10px;"><b>Vendor scope</b> — only used if the role above is "External Vendor". They'll automatically see every report matching both fields below.</p>
+    <div class="field"><label>Company name</label><input name="vendorCompany" type="text" value="${escapeHtml(u.vendor_company||'')}" placeholder="e.g. FibreLink SA" /></div>
+    ${selectWithOther('adminVendorResidence', RESIDENCES, 'Residence they cover', u.vendor_residence||'', '')}
+    <div class="field">
+      <label>Category they cover</label>
+      <select name="vendorCategory">
+        <option value="">Select...</option>
+        ${CATEGORIES.map(c=>`<option value="${escapeHtml(c)}" ${u.vendor_category===c?'selected':''}>${escapeHtml(c)}</option>`).join("")}
+      </select>
+    </div>
     <button type="submit" class="btn btn-primary">Save role</button>
   </form>`;
 }
@@ -1546,9 +1684,23 @@ function bindShellEvents(){
       const f = e.target;
       const role = f.role.value;
       const residence = (role==='house_committee'||role==='residence_manager') ? resolveOtherField(f,'adminResidence') : "";
-      adminAssignRole(state.adminSelected.id, role, residence, f.phone.value.trim());
+      const vendorResidence = role==='vendor' ? resolveOtherField(f,'adminVendorResidence') : "";
+      const vendorCategory = role==='vendor' ? f.vendorCategory.value : "";
+      const vendorCompany = role==='vendor' ? f.vendorCompany.value.trim() : "";
+      adminAssignRole(state.adminSelected.id, role, residence, f.phone.value.trim(), vendorResidence, vendorCategory, vendorCompany);
     };
   }
+
+  const addPartnerForm = document.getElementById('addPartnerForm');
+  if(addPartnerForm) addPartnerForm.onsubmit = (e)=>{
+    e.preventDefault();
+    const f = e.target;
+    addApprovedPartner(f.partnerEmail.value, f.partnerCompany.value);
+    f.reset();
+  };
+  document.querySelectorAll('[data-remove-partner]').forEach(b=>{
+    b.onclick = ()=> removeApprovedPartner(b.dataset.removePartner);
+  });
 
   const backBtn = document.getElementById('backBtn');
   if(backBtn) backBtn.onclick = ()=>{
@@ -1646,6 +1798,18 @@ function bindShellEvents(){
     if(!n.value.trim()){ showToast("Write a note first."); return; }
     await commentTicket(t, n.value.trim()); render();
   };
+  const forwardVendorBtn = document.getElementById('forwardVendorBtn');
+  if(forwardVendorBtn) forwardVendorBtn.onclick = async ()=>{ await forwardToVendor(t, findVendorFor(t)); render(); };
+  const vendorCommentBtn = document.getElementById('vendorCommentBtn');
+  if(vendorCommentBtn) vendorCommentBtn.onclick = async ()=>{
+    const n = document.getElementById('vendorNote');
+    if(!n.value.trim()){ showToast("Write a note first."); return; }
+    await sb.from('ticket_events').insert({
+      ticket_id: t.id, stage: t.chain[t.stage_index-1], action: "comment", note: n.value.trim(),
+      by_name: state.user.vendor_company || state.user.name, by_role: "vendor"
+    });
+    await loadTicketEvents(t.id); render();
+  };
 
   // edit profile
   const profileForm = document.getElementById('profileForm');
@@ -1685,6 +1849,61 @@ function bindShellEvents(){
     console.error("bootstrap failed", e);
     state.loading = false;
     render();
+  }
+})();
+
+/* ---------------- PWA: service worker + install prompt ---------------- */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW registration failed', e));
+  });
+}
+
+(function setupInstallPrompt(){
+  const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+  if (isStandalone) return; // already installed — nothing to show
+  if (localStorage.getItem('fixitsmu_install_dismissed') === '1') return;
+
+  function makeBanner(text, onInstallClick){
+    const bar = document.createElement('div');
+    bar.style.cssText = "position:fixed;left:12px;right:12px;bottom:12px;z-index:9999;background:#0A403C;color:#EFE6D6;padding:12px 14px;border-radius:12px;display:flex;align-items:center;gap:10px;font-family:'Inter',sans-serif;font-size:14px;box-shadow:0 8px 24px rgba(0,0,0,.25);";
+    const span = document.createElement('span');
+    span.style.flex = "1";
+    span.textContent = text;
+    bar.appendChild(span);
+    if (onInstallClick){
+      const btn = document.createElement('button');
+      btn.textContent = "Install";
+      btn.style.cssText = "background:#E15A3D;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-weight:600;cursor:pointer;flex-shrink:0;";
+      btn.onclick = onInstallClick;
+      bar.appendChild(btn);
+    }
+    const close = document.createElement('button');
+    close.textContent = "✕";
+    close.setAttribute('aria-label', 'Dismiss');
+    close.style.cssText = "background:none;border:none;color:#EFE6D6;font-size:16px;cursor:pointer;padding:4px 6px;flex-shrink:0;";
+    close.onclick = () => { bar.remove(); localStorage.setItem('fixitsmu_install_dismissed', '1'); };
+    bar.appendChild(close);
+    document.body.appendChild(bar);
+    return bar;
+  }
+
+  // Android/Chrome: real native install prompt.
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    const bar = makeBanner("Install Fixit SMU on your phone for quicker access.", async () => {
+      bar.remove();
+      e.prompt();
+      await e.userChoice;
+    });
+  });
+
+  // iOS Safari has no install-prompt API — only manual "Add to Home Screen" works.
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  if (isIOS) {
+    setTimeout(() => {
+      makeBanner('Install this app: tap the Share icon below, then "Add to Home Screen".');
+    }, 2500);
   }
 })();
 </script>
