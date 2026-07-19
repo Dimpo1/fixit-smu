@@ -240,6 +240,7 @@ const CHAINS = {
 
 const STAGE_LABELS = {
   student: "Reported",
+  vendor: "External Vendor",
   house_committee: "House Committee",
   residence_manager: "Residence Manager",
   src: "SRC"
@@ -274,6 +275,14 @@ const CATEGORIES = [
   "Academic / Administrative",
   "Health & Wellness Facility",
   "Other"
+];
+
+// External vendors (Wi-Fi/maintenance contractors) are only ever assigned
+// to these two categories — everything else always stays with House
+// Committee directly, no vendor stage involved.
+const VENDOR_CATEGORIES = [
+  "Wi-Fi / Internet Connectivity",
+  "Maintenance (plumbing, electrical, structural)"
 ];
 
 // Example/demo leader contacts shown until real leaders are assigned by an
@@ -572,8 +581,26 @@ function subscribeRealtime(){
 }
 
 /* ---------------- ticket logic ---------------- */
+async function findVendorForResidenceCategory(residence, category){
+  if(!residence || !VENDOR_CATEGORIES.includes(category)) return null;
+  const { data } = await sb.from('profiles').select('id')
+    .eq('role', 'vendor')
+    .ilike('vendor_residence', residence)
+    .ilike('vendor_category', category)
+    .limit(1);
+  return (data && data[0]) || null;
+}
+
 async function createTicket(data){
-  const chain = CHAINS[data.type];
+  let chain = CHAINS[data.type];
+  // If there's an assigned external vendor for this exact residence +
+  // category, they become the first stage — student → vendor → House
+  // Committee → Residence Manager → SRC — with their own SLA. Otherwise
+  // the normal chain applies unchanged.
+  if(data.type === 'residence'){
+    const vendor = await findVendorForResidenceCategory(data.residence, data.category);
+    if(vendor){ chain = ["student", "vendor", ...CHAINS.residence.slice(1)]; }
+  }
   const { data: ticket, error } = await sb.from('tickets').insert({
     type: data.type, category: data.category, residence: data.residence || "",
     location: data.location, description: data.description, urgency: data.urgency,
@@ -656,6 +683,11 @@ function canActOnTicket(t, user){
     return !!(t.residence && user.residence &&
       t.residence.trim().toLowerCase() === user.residence.trim().toLowerCase());
   }
+  if(user.role === "vendor"){
+    return !!(t.residence && user.vendor_residence && user.vendor_category &&
+      t.residence.trim().toLowerCase() === user.vendor_residence.trim().toLowerCase() &&
+      t.category.trim().toLowerCase() === user.vendor_category.trim().toLowerCase());
+  }
   return true; // src
 }
 function myReports(){
@@ -700,12 +732,18 @@ async function saveFeedback(entry){
 
 /* ---------------- admin ---------------- */
 async function adminSearch(q){
-  if(q.length < 2){ state.adminResults = []; render(); return; }
+  if(q.length < 2){
+    state.adminResults = [];
+    const box = document.getElementById('adminResults');
+    if(box){ box.innerHTML = renderAdminResultRows(); bindAdminResultRows(); }
+    return;
+  }
   const { data } = await sb.from('profiles').select('*')
     .or(`name.ilike.%${q}%,email.ilike.%${q}%`)
     .limit(10);
   state.adminResults = data || [];
-  render();
+  const box = document.getElementById('adminResults');
+  if(box){ box.innerHTML = renderAdminResultRows(); bindAdminResultRows(); }
 }
 async function adminAssignRole(userId, role, residence, phone, vendorResidence, vendorCategory, vendorCompany){
   const { error } = await sb.from('profiles').update({
@@ -1555,6 +1593,24 @@ function barRows(dataObj, total){
   }).join("");
 }
 
+function renderAdminResultRows(){
+  return state.adminResults.map(u => `
+    <div class="ticket-row" data-admin-pick="${u.id}" style="margin-top:8px;padding:12px 14px;">
+      <div class="t-main">
+        <div class="t-title">${escapeHtml(u.name)} <span class="hint">(${ROLE_LABELS[u.role]})</span></div>
+        <div class="t-sub">${escapeHtml(u.email)}${u.residence?" · "+escapeHtml(u.residence):""}</div>
+      </div>
+    </div>`).join("");
+}
+function bindAdminResultRows(){
+  document.querySelectorAll('[data-admin-pick]').forEach(row=>{
+    row.onclick = ()=>{
+      const picked = state.adminResults.find(u => u.id === row.dataset.adminPick);
+      state.adminSelected = picked || null;
+      render();
+    };
+  });
+}
 function renderAdmin(){
   return `
   <div class="topbar">
@@ -1564,13 +1620,7 @@ function renderAdmin(){
   <div class="card">
     <div class="field"><label>Search by name or email</label><input id="adminSearch" type="text" placeholder="Start typing…" autocomplete="off" /></div>
     <div id="adminResults">
-      ${state.adminResults.map(u => `
-        <div class="ticket-row" data-admin-pick="${u.id}" style="margin-top:8px;padding:12px 14px;">
-          <div class="t-main">
-            <div class="t-title">${escapeHtml(u.name)} <span class="hint">(${ROLE_LABELS[u.role]})</span></div>
-            <div class="t-sub">${escapeHtml(u.email)}${u.residence?" · "+escapeHtml(u.residence):""}</div>
-          </div>
-        </div>`).join("")}
+      ${renderAdminResultRows()}
     </div>
     ${state.adminSelected ? renderAdminAssignForm(state.adminSelected) : ``}
   </div>
@@ -1620,8 +1670,9 @@ function renderAdminAssignForm(u){
       <label>Category they cover</label>
       <select name="vendorCategory">
         <option value="">Select...</option>
-        ${CATEGORIES.map(c=>`<option value="${escapeHtml(c)}" ${u.vendor_category===c?'selected':''}>${escapeHtml(c)}</option>`).join("")}
+        ${VENDOR_CATEGORIES.map(c=>`<option value="${escapeHtml(c)}" ${u.vendor_category===c?'selected':''}>${escapeHtml(c)}</option>`).join("")}
       </select>
+      <div class="hint">Vendors are only ever automatically first-in-line for these two categories — House Committee still handles everything else directly.</div>
     </div>
     <button type="submit" class="btn btn-primary">Save role</button>
   </form>`;
@@ -1671,13 +1722,7 @@ function bindShellEvents(){
   const adminSearchInput = document.getElementById('adminSearch');
   if(adminSearchInput){
     adminSearchInput.oninput = ()=> adminSearch(adminSearchInput.value.trim());
-    document.querySelectorAll('[data-admin-pick]').forEach(row=>{
-      row.onclick = ()=>{
-        const picked = state.adminResults.find(u => u.id === row.dataset.adminPick);
-        state.adminSelected = picked || null;
-        render();
-      };
-    });
+    bindAdminResultRows();
     const assignForm = document.getElementById('adminAssignForm');
     if(assignForm) assignForm.onsubmit = (e)=>{
       e.preventDefault();
