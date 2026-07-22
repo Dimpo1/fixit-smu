@@ -1119,9 +1119,9 @@ function renderReportForm(){
 
       <div class="field">
         <label>Photos (optional)</label>
-        <input id="reportPhotoInput" type="file" accept="image/*" capture="environment" multiple style="display:none;" />
+        <input id="reportPhotoInput" type="file" accept="image/*" multiple style="display:none;" />
         <button type="button" id="reportPhotoBtn" class="btn btn-ghost" ${state.reportPhotos.length>=3?'disabled':''}>📷 Add a photo</button>
-        <div class="hint">Up to 3 photos. They're compressed automatically so this won't eat much data.</div>
+        <div class="hint">Up to 3 photos : take a new one or choose from your gallery (handy for screenshots, e.g. a Wi-Fi speed test). Compressed automatically so this won't eat much data.</div>
         <div id="reportPhotoPreviews" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;">${renderPhotoPreviewsHTML()}</div>
       </div>
 
