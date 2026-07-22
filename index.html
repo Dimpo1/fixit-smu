@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Fixit SMU — Report It, Track It, Fix It</title>
+<title>Fixit SMU | Report It, Track It, Fix It</title>
 <link rel="manifest" href="manifest.json" />
 <meta name="theme-color" content="#0F5C56" />
 <link rel="icon" href="./icon-192.png" />
@@ -215,12 +215,10 @@
 
 <script>
 /* ============================================================
-   Fixit SMU — issue reporting & escalation, live backend edition.
-   Data lives in Supabase (see schema.sql). Fill in SUPABASE_URL and
-   SUPABASE_ANON_KEY below before this will work.
+   Fixit SMU — issue reporting & escalation, live backend
    ============================================================ */
 
-const SUPABASE_URL = "https://jjuznuvducfziicgkqcw.supabase.co";       // e.g. https://xxxxxxxx.supabase.co
+const SUPABASE_URL = "https://jjuznuvducfziicgkqcw.supabase.co";   
 const SUPABASE_ANON_KEY = "sb_publishable_T8ubMSG_OHW6c_LWBAJPDQ_knrwrgbm";
 const CONFIGURED = !SUPABASE_URL.includes("YOUR_") && !SUPABASE_ANON_KEY.includes("YOUR_");
 const sb = CONFIGURED ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
@@ -250,7 +248,7 @@ const SLA_HOURS = { health_emergency: 0.5, high: 2, medium: 24, low: 24 };
 const URGENCY_LABELS = { health_emergency: "🚨 Health Emergency", high: "High", medium: "Medium", low: "Low" };
 
 // NOTE FOR DEV: residence list below is the real SMU list. Campus building
-// names are still placeholders — swap them for the real ones before go-live.
+// names are still placeholders.
 const RESIDENCES = [
   "1A Residence","1B Residence","1C Residence","1D Residence",
   "2A Residence","2B Residence",
@@ -262,7 +260,7 @@ const RESIDENCES = [
 ];
 const CAMPUS_LOCATIONS = ["Library","Main Administration Building","Lecture Halls / Auditorium","Student Centre","Cafeteria / Dining Hall","Campus Clinic","Sports & Recreation Centre","Computer / IT Labs","Parking Area","Other (type below)"];
 const OTHER_VAL = "Other (type below)";
-// Fill this in once the WhatsApp reporting line (see whatsapp-webhook backend) is live.
+// Fill this in once the whatsapp-webhook backend is live.
 const WHATSAPP_REPORT_NUMBER = "";
 
 const CATEGORIES = [
@@ -278,7 +276,7 @@ const CATEGORIES = [
 ];
 
 // External vendors (Wi-Fi/maintenance contractors) are only ever assigned
-// to these two categories — everything else always stays with House
+// to these two categories; everything else always stays with House
 // Committee directly, no vendor stage involved.
 const VENDOR_CATEGORIES = [
   "Wi-Fi / Internet Connectivity",
@@ -286,7 +284,7 @@ const VENDOR_CATEGORIES = [
 ];
 
 // Example/demo leader contacts shown until real leaders are assigned by an
-// admin — clearly marked "Example" and auto-replaced the moment a real
+// admin; clearly marked "Example" and auto-replaced the moment a real
 // person is promoted into that residence/role.
 const DEMO_LEADERS = [
   {name:"Lerato Mokoena", role:"house_committee", residence:"1A Residence", phone:"081 234 5601", isDemo:true},
@@ -334,7 +332,9 @@ let state = {
   adminResults: [],
   adminSelected: null,
   slaBreachTicketIds: new Set(),
-  approvedPartners: []
+  approvedPartners: [],
+  reportPhotos: [],          // [{file, url}] staged photos for the report currently being filled in
+  currentTicketPhotoUrls: [] // signed URLs for the ticket currently open in detail view
 };
 
 /* ---------------- small helpers ---------------- */
@@ -386,9 +386,13 @@ function bindOtherToggles(){
 /* ---------------- routing ----------------
    Wrapped defensively: some artifact/iframe sandboxes block the History
    API, and a thrown SecurityError here must never stop render() from
-   running — that would freeze the whole app right after login. */
+   running; that would freeze the whole app right after login. */
 let suppressHashHandler = false;
 function setView(view, ticketId){
+  if(state.view === "report" && view !== "report" && state.reportPhotos.length){
+    state.reportPhotos.forEach(p => URL.revokeObjectURL(p.url));
+    state.reportPhotos = [];
+  }
   state.view = view;
   state.currentTicketId = ticketId || null;
   try{
@@ -416,7 +420,7 @@ try{
 function validEmail(email){
   const e = email.trim().toLowerCase();
   // SMU addresses always pass here. Anything else that's still a well-formed
-  // email is allowed to attempt signup too — the database is the real
+  // email is allowed to attempt signup too | the database is the real
   // authority (enforce_smu_email trigger), and will reject it with a clear
   // message unless an admin has pre-approved it as an external partner.
   return /^[0-9]{9}@swave\.smu\.ac\.za$/.test(e) || /^[^@]+@smu\.ac\.za$/.test(e) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
@@ -430,9 +434,9 @@ async function handleSignup(form){
   const roomNumber = form.roomNumber ? form.roomNumber.value.trim() : "";
   const residence = resolveOtherField(form, 'residence');
 
-  // Preserve everything the person already typed right away — if validation
+  // Preserve everything the person already typed right away; if validation
   // fails below, render() redraws this whole form, and only fields wired to
-  // this draft survive that. (Password is deliberately left out — normal
+  // this draft survive that. (Password is deliberately left out | normal
   // practice is to make them retype it, not persist it in state.)
   state.signupDraft = { name, email, phone, roomNumber, residence };
 
@@ -577,10 +581,105 @@ function subscribeRealtime(){
         render();
       })
       .subscribe();
-  }catch(e){ /* realtime optional — ignore if unavailable */ }
+  }catch(e){ /* realtime optional, ignore if unavailable */ }
 }
 
 /* ---------------- ticket logic ---------------- */
+// Resize+compress in the browser before upload. keeps data usage low for
+// students on limited bundles, which matters a lot for this specific app.
+function compressImage(file, maxDim = 1280, quality = 0.72){
+  return new Promise((resolve) => {
+    const objUrl = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      if(width > maxDim || height > maxDim){
+        if(width > height){ height = Math.round(height * maxDim / width); width = maxDim; }
+        else { width = Math.round(width * maxDim / height); height = maxDim; }
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width; canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      canvas.toBlob((blob) => {
+        URL.revokeObjectURL(objUrl);
+        resolve(blob || file);
+      }, 'image/jpeg', quality);
+    };
+    img.onerror = () => { URL.revokeObjectURL(objUrl); resolve(file); }; // fall back to original if it won't decode
+    img.src = objUrl;
+  });
+}
+
+async function uploadTicketPhotos(ticketId, photoEntries){
+  const paths = [];
+  for(const entry of photoEntries){
+    try{
+      const blob = await compressImage(entry.file);
+      const path = `${ticketId}/${crypto.randomUUID()}.jpg`;
+      const { error } = await sb.storage.from('ticket-photos').upload(path, blob, { contentType: 'image/jpeg' });
+      if(!error) paths.push(path);
+    } catch(e){ /* one bad photo shouldn't block the whole report */ }
+  }
+  return paths;
+}
+
+async function loadTicketPhotoUrls(ticket){
+  state.currentTicketPhotoUrls = [];
+  if(!ticket || !ticket.photo_urls || !ticket.photo_urls.length) return;
+  const results = await Promise.all(
+    ticket.photo_urls.map(p => sb.storage.from('ticket-photos').createSignedUrl(p, 3600))
+  );
+  state.currentTicketPhotoUrls = results.map(r => r.data && r.data.signedUrl).filter(Boolean);
+}
+
+function renderPhotoPreviewsHTML(){
+  return state.reportPhotos.map((p, i) => `
+    <div style="position:relative;width:72px;height:72px;">
+      <img src="${p.url}" style="width:72px;height:72px;object-fit:cover;border-radius:10px;border:1px solid var(--line);" />
+      <button type="button" data-remove-photo="${i}" aria-label="Remove photo"
+        style="position:absolute;top:-8px;right:-8px;width:22px;height:22px;border-radius:50%;background:var(--danger);color:#fff;border:none;cursor:pointer;font-size:13px;line-height:1;">✕</button>
+    </div>`).join("");
+}
+
+function bindPhotoPicker(){
+  const btn = document.getElementById('reportPhotoBtn');
+  const input = document.getElementById('reportPhotoInput');
+  const preview = document.getElementById('reportPhotoPreviews');
+  if(!btn || !input || !preview) return;
+
+  btn.onclick = () => input.click();
+
+  input.onchange = () => {
+    const room = 3 - state.reportPhotos.length;
+    const picked = Array.from(input.files || []).filter(f => f.type.startsWith('image/')).slice(0, Math.max(0, room));
+    if(!picked.length && input.files && input.files.length){
+      showToast("Photos only, and up to 3 total.");
+    }
+    picked.forEach(file => state.reportPhotos.push({ file, url: URL.createObjectURL(file) }));
+    input.value = ""; // allow picking the same file again later
+    preview.innerHTML = renderPhotoPreviewsHTML();
+    if(state.reportPhotos.length >= 3) btn.setAttribute('disabled', 'true'); else btn.removeAttribute('disabled');
+    bindPhotoRemoveButtons();
+  };
+
+  bindPhotoRemoveButtons();
+}
+
+function bindPhotoRemoveButtons(){
+  document.querySelectorAll('[data-remove-photo]').forEach(b => {
+    b.onclick = () => {
+      const idx = parseInt(b.dataset.removePhoto, 10);
+      const removed = state.reportPhotos.splice(idx, 1)[0];
+      if(removed) URL.revokeObjectURL(removed.url);
+      const preview = document.getElementById('reportPhotoPreviews');
+      if(preview) preview.innerHTML = renderPhotoPreviewsHTML();
+      const btn = document.getElementById('reportPhotoBtn');
+      if(btn) btn.removeAttribute('disabled');
+      bindPhotoRemoveButtons();
+    };
+  });
+}
+
 async function findVendorForResidenceCategory(residence, category){
   if(!residence || !VENDOR_CATEGORIES.includes(category)) return null;
   const { data } = await sb.from('profiles').select('id')
@@ -594,8 +693,8 @@ async function findVendorForResidenceCategory(residence, category){
 async function createTicket(data){
   let chain = CHAINS[data.type];
   // If there's an assigned external vendor for this exact residence +
-  // category, they become the first stage — student → vendor → House
-  // Committee → Residence Manager → SRC — with their own SLA. Otherwise
+  // category, they become the first stage : student → vendor → House
+  // Committee → Residence Manager → SRC : with their own SLA. Otherwise
   // the normal chain applies unchanged.
   if(data.type === 'residence'){
     const vendor = await findVendorForResidenceCategory(data.residence, data.category);
@@ -611,6 +710,12 @@ async function createTicket(data){
     ticket_id: ticket.id, stage: "student", action: "reported", note: data.description,
     by_name: state.user.name, by_role: "student"
   });
+  if(state.reportPhotos.length){
+    const paths = await uploadTicketPhotos(ticket.id, state.reportPhotos);
+    if(paths.length) await sb.from('tickets').update({ photo_urls: paths }).eq('id', ticket.id);
+    state.reportPhotos.forEach(p => URL.revokeObjectURL(p.url));
+    state.reportPhotos = [];
+  }
   await loadTickets();
   setView("ticket", ticket.id);
   showToast("Issue reported. It's now with " + STAGE_LABELS[chain[1]] + ".");
@@ -699,6 +804,8 @@ function myQueueTickets(){
 }
 async function openTicket(id){
   await loadTicketEvents(id);
+  const ticket = state.tickets.find(t => t.id === id);
+  await loadTicketPhotoUrls(ticket);
   setView("ticket", id);
 }
 
@@ -768,7 +875,7 @@ async function addApprovedPartner(email, company){
   const { error } = await sb.from('approved_partner_emails').insert({ email, company: (company||"").trim() });
   if(error){ showToast("Could not add: " + error.message); return; }
   await loadApprovedPartners();
-  showToast("Pre-approved — they can now sign up with that email.");
+  showToast("Pre-approved : they can now sign up with that email.");
   render();
 }
 async function removeApprovedPartner(email){
@@ -828,7 +935,7 @@ function renderAuth(){
       ${isSignup ? renderSignupForm() : renderSigninForm()}
       <div class="divider"></div>
       <div class="banner" style="margin-bottom:0;">
-        <b>New here?</b> Everyone signs up as a student — House Committee, Residence Manager, and SRC
+        <b>New here?</b> Everyone signs up as a student | House Committee, Residence Manager, and SRC
         accounts are assigned by an admin afterwards, not self-selected.
       </div>
     </div>
@@ -872,7 +979,7 @@ function renderSignupForm(){
       <label>Room number</label>
       <input name="roomNumber" type="text" placeholder="e.g. 214" value="${escapeHtml(d.roomNumber||'')}" />
     </div>
-    ${selectWithOther('residence', RESIDENCES, 'Your residence', d.residence||'', "Leave the fallback text box blank if you're off-campus — this just helps whoever's setting up leaders know where you live.")}
+    ${selectWithOther('residence', RESIDENCES, 'Your residence', d.residence||'', "Leave the fallback text box blank if you're off-campus.")}
     <div class="field">
       <label>Phone number</label>
       <input name="phone" type="tel" placeholder="e.g. 082 000 0000" value="${escapeHtml(d.phone||'')}" />
@@ -964,7 +1071,7 @@ function renderReportForm(){
   </div>
   <div class="banner"><b>Response times:</b> Health Emergencies must be attended to within <b>30 minutes</b>. High urgency within <b>2 hours</b>. Everything else has <b>24 hours</b>. If nobody acts in time, it automatically escalates to the next person in the chain.</div>
   ${WHATSAPP_REPORT_NUMBER
-    ? `<div class="banner"><b>Wi-Fi down?</b> You can also report it on WhatsApp without using data — message <a href="https://wa.me/${WHATSAPP_REPORT_NUMBER}" target="_blank" rel="noopener"><b>+${WHATSAPP_REPORT_NUMBER}</b></a>.</div>`
+    ? `<div class="banner"><b>Wi-Fi down?</b> You can also report it on WhatsApp without using data | message <a href="https://wa.me/${WHATSAPP_REPORT_NUMBER}" target="_blank" rel="noopener"><b>+${WHATSAPP_REPORT_NUMBER}</b></a>.</div>`
     : `<div class="banner"><b>Coming soon:</b> a WhatsApp reporting line, so you can report a Wi-Fi outage (or anything else) without needing a data bundle.</div>`}
   <div class="card">
     <form id="reportForm">
@@ -1011,6 +1118,14 @@ function renderReportForm(){
       </div>
 
       <div class="field">
+        <label>Photos (optional)</label>
+        <input id="reportPhotoInput" type="file" accept="image/*" capture="environment" multiple style="display:none;" />
+        <button type="button" id="reportPhotoBtn" class="btn btn-ghost" ${state.reportPhotos.length>=3?'disabled':''}>📷 Add a photo</button>
+        <div class="hint">Up to 3 photos. They're compressed automatically so this won't eat much data.</div>
+        <div id="reportPhotoPreviews" style="display:flex;gap:10px;flex-wrap:wrap;margin-top:10px;">${renderPhotoPreviewsHTML()}</div>
+      </div>
+
+      <div class="field">
         <label>Urgency</label>
         <div class="urgency-toggle">
           <button type="button" data-urgency="low" class="${state.newUrgency==='low'?'sel-low':''}">Low</button>
@@ -1048,7 +1163,7 @@ function renderHealthForm(){
   const h = state.healthInfo;
   return `
   <div class="topbar">
-    <div><h1>Health &amp; emergency info</h1><p>Hidden from other students — visible to House Committee, Residence Managers, and SRC only in case of emergency.</p></div>
+    <div><h1>Health &amp; emergency info</h1><p>Hidden from other students | visible to House Committee, Residence Managers, and SRC only in case of emergency.</p></div>
   </div>
   <div class="sos-card">
     <h3>In an active emergency, call first — don't wait on this app</h3>
@@ -1060,7 +1175,7 @@ function renderHealthForm(){
     </div>
     <p style="margin-top:10px;font-size:11.5px;opacity:.85;">*Confirm and update this with SMU's real protection services number before going live.</p>
   </div>
-  <div class="banner"><b>Who can see this:</b> other students never can. House Committee, Residence Managers, and SRC can look this up only when there's an emergency involving you — every lookup is tied to their own account, so it's auditable.</div>
+  <div class="banner"><b>Who can see this:</b> other students never can. House Committee, Residence Managers, and SRC can look this up only when there's an emergency involving you | every lookup is tied to their own account, so it's auditable.</div>
   <div class="card">
     <form id="healthForm">
       <div class="grid2">
@@ -1242,6 +1357,18 @@ function renderTicketDetail(){
     </div>
     ${t.residence ? `<div class="field"><label>Location</label><div>${escapeHtml(t.location)}</div></div>` : ``}
     <div class="field"><label>Description</label><div>${escapeHtml(t.description)}</div></div>
+    ${(t.photo_urls && t.photo_urls.length) ? `
+    <div class="field">
+      <label>Photos</label>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;">
+        ${state.currentTicketPhotoUrls.length
+          ? state.currentTicketPhotoUrls.map(url => `
+            <a href="${url}" target="_blank" rel="noopener">
+              <img src="${url}" style="width:96px;height:96px;object-fit:cover;border-radius:10px;border:1px solid var(--line);" />
+            </a>`).join("")
+          : `<span class="hint">Loading photos…</span>`}
+      </div>
+    </div>` : ``}
   </div>
 
   ${canAct ? `
@@ -1782,6 +1909,7 @@ function bindShellEvents(){
     state.newIssueType = null;
     state.newUrgency = "medium";
   };
+  if(reportForm) bindPhotoPicker();
 
   // health form
   const healthForm = document.getElementById('healthForm');
