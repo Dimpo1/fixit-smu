@@ -214,9 +214,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <script>
-/* ============================================================
-   Fixit SMU — issue reporting & escalation, live backend
-   ============================================================ */
+/*back-end */
 
 const SUPABASE_URL = "https://jjuznuvducfziicgkqcw.supabase.co";   
 const SUPABASE_ANON_KEY = "sb_publishable_T8ubMSG_OHW6c_LWBAJPDQ_knrwrgbm";
@@ -275,17 +273,14 @@ const CATEGORIES = [
   "Other"
 ];
 
-// External vendors (Wi-Fi/maintenance contractors) are only ever assigned
-// to these two categories; everything else always stays with House
-// Committee directly, no vendor stage involved.
+// External vendors (Wi-Fi/maintenance contractors) assignment
+  
 const VENDOR_CATEGORIES = [
   "Wi-Fi / Internet Connectivity",
   "Maintenance (plumbing, electrical, structural)"
 ];
 
-// Example/demo leader contacts shown until real leaders are assigned by an
-// admin; clearly marked "Example" and auto-replaced the moment a real
-// person is promoted into that residence/role.
+// Example/demo leader for contacts 
 const DEMO_LEADERS = [
   {name:"Lerato Mokoena", role:"house_committee", residence:"1A Residence", phone:"081 234 5601", isDemo:true},
   {name:"Karabo Dlamini", role:"house_committee", residence:"1B Residence", phone:"081 234 5602", isDemo:true},
@@ -320,11 +315,11 @@ let state = {
   contacts: [],
   currentTicketId: null,
   loading: true,
-  authMode: "signin",       // signin | signup
+  authMode: "signin",       // signin or signup
   authError: "",
   authSuccess: "",
   lastSignupEmail: "",
-  signupDraft: {},          // preserves entered signup values across a failed-validation re-render
+  signupDraft: {},          // preservation of entered signup values across a failed-validation re-render
   toast: null,
   newIssueType: null,
   newUrgency: "medium",
@@ -383,10 +378,7 @@ function bindOtherToggles(){
   });
 }
 
-/* ---------------- routing ----------------
-   Wrapped defensively: some artifact/iframe sandboxes block the History
-   API, and a thrown SecurityError here must never stop render() from
-   running; that would freeze the whole app right after login. */
+/* ---------------- routing ----------------*/
 let suppressHashHandler = false;
 function setView(view, ticketId){
   if(state.view === "report" && view !== "report" && state.reportPhotos.length){
@@ -420,9 +412,7 @@ try{
 function validEmail(email){
   const e = email.trim().toLowerCase();
   // SMU addresses always pass here. Anything else that's still a well-formed
-  // email is allowed to attempt signup too | the database is the real
-  // authority (enforce_smu_email trigger), and will reject it with a clear
-  // message unless an admin has pre-approved it as an external partner.
+  // email is allowed to attempt signup too
   return /^[0-9]{9}@swave\.smu\.ac\.za$/.test(e) || /^[^@]+@smu\.ac\.za$/.test(e) || /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 }
 
@@ -434,10 +424,7 @@ async function handleSignup(form){
   const roomNumber = form.roomNumber ? form.roomNumber.value.trim() : "";
   const residence = resolveOtherField(form, 'residence');
 
-  // Preserve everything the person already typed right away; if validation
-  // fails below, render() redraws this whole form, and only fields wired to
-  // this draft survive that. (Password is deliberately left out | normal
-  // practice is to make them retype it, not persist it in state.)
+  // Preserve everything the person already typed right away.
   state.signupDraft = { name, email, phone, roomNumber, residence };
 
   if(!validEmail(email)){
@@ -523,8 +510,7 @@ async function loadTickets(){
   state.tickets = data || [];
 }
 async function loadAnalytics(){
-  // RLS on ticket_events cascades from tickets visibility, so this
-  // naturally only returns breach events for tickets this user can see.
+  // only returns breach events for tickets a user can see
   const { data } = await sb.from('ticket_events').select('ticket_id').eq('action', 'auto_escalated');
   state.slaBreachTicketIds = new Set((data||[]).map(e=>e.ticket_id));
 }
@@ -693,8 +679,8 @@ async function findVendorForResidenceCategory(residence, category){
 async function createTicket(data){
   let chain = CHAINS[data.type];
   // If there's an assigned external vendor for this exact residence +
-  // category, they become the first stage : student → vendor → House
-  // Committee → Residence Manager → SRC : with their own SLA. Otherwise
+  // category, they become the first stage. student → vendor → House
+  // Committee → Residence Manager → SRC (with their own SLA) . Otherwise
   // the normal chain applies unchanged.
   if(data.type === 'residence'){
     const vendor = await findVendorForResidenceCategory(data.residence, data.category);
