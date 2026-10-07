@@ -1,0 +1,59 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --color-bg: #F7F5F0;
+  --color-ink: #132A26;
+  --color-teal: #0F5C56;
+  --color-teal-dark: #0A403C;
+  --color-teal-light: #147A72;
+  --color-coral: #E15A3D;
+  --color-coral-dark: #C94A30;
+  --color-coral-light: #FCEFE9;
+  --color-sand: #EFE6D6;
+  --color-sage: #7FA292;
+  --color-line: #DDD3BF;
+  --color-smuwhite: #FFFDFA;
+  --color-danger: #C0392B;
+  --color-danger-light: #FBE7E3;
+  --color-gold: #C08B2E;
+  --color-gold-light: #FBF1DD;
+
+  --font-serif: "Fraunces", serif;
+  --font-sans: "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+:root {
+  --bg: #F7F5F0;
+  --ink: #132A26;
+  --teal: #0F5C56;
+  --teal-dark: #0A403C;
+  --coral: #E15A3D;
+  --sand: #EFE6D6;
+  --sage: #7FA292;
+  --line: #DDD3BF;
+  --white: #FFFDFA;
+  --danger: #C0392B;
+  --gold: #C08B2E;
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, .font-serif {
+  font-family: var(--font-serif);
+}
+
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background-color: var(--color-coral);
+  color: #ffffff;
+}
